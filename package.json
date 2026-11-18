@@ -1,0 +1,23 @@
+{
+  "name": "logictl",
+  "version": "0.1.0",
+  "description": "Direct HID++ 2.0 control of Logitech mice (DPI, battery, buttons) with no Logitech software, plus a reverse-engineered Logi Options+ kiros/WebSocket client.",
+  "bin": {
+    "logihid": "src/logihid.js",
+    "logictl": "src/cli.js"
+  },
+  "main": "src/hidpp.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["logitech", "hid++", "hidpp", "mx-master", "dpi", "node-hid"],
+  "author": "",
+  "dependencies": {
+    "node-hid": "^3.1.2"
+  }
+}
