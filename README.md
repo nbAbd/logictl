@@ -41,6 +41,10 @@ logihid smartshift threshold <1-50>   auto-shift torque (1=easiest free-spin, 50
 logihid wheel                         show hi-res wheel state
 logihid wheel hires on|off            toggle hi-res smooth scrolling
 logihid wheel invert on|off           toggle scroll direction
+logihid host                          list paired computers (slot, current, name)
+logihid host <n>                      switch mouse to paired computer n (0-based)
+logihid profile save <file>           snapshot settings to a JSON file
+logihid profile apply <file>          apply a profile, then report what stuck
 logihid raw <featureId> <func> [b..]  low-level HID++ call (integers; prefix hex with 0x)
 logihid --pid <0xNNNN> <cmd>          select a productId (default: first HID++ device)
 ```
@@ -100,6 +104,36 @@ status  : discharging
   mode byte via func 2, **preserving bit0 (target)** so wheel scroll delivery is
   never diverted. `invert` is gated on caps bit `0x08`. Verified self-restoring
   (invert toggled, target+hi-res preserved, mode byte restored to `0x03`).
+- **Host switch (`0x1814` + `0x1815`)** — `host` lists paired computers (slot,
+  current, name) via `0x1815`; `host <n>` switches the active computer (func 1,
+  no reply). The write is one-way: the mouse immediately disconnects from this
+  machine, so there is no read-back — a timeout is expected success, not failure.
+  Guarded: refuses an unpaired slot, no-ops on the current slot, and points at the
+  mouse's physical Easy-Switch button as the way back. Not switch-tested from CI
+  (the device leaves on success).
+
+### Profiles
+
+`profile save <file>` snapshots the one-shot settings (DPI, SmartShift
+mode+threshold, wheel hi-res+invert) to a JSON file you can keep in git:
+
+```json
+{ "version": 1, "device": { "model": "MX Master 3S", "productId": 45108 },
+  "settings": { "dpi": 2000, "smartshift": { "mode": "ratchet", "threshold": 12 },
+                "wheel": { "hires": true, "invert": false } } }
+```
+
+`profile apply <file>` writes each setting, then **reads every value back and
+reports whether it stuck or reverted** — a drift report. If the Logi Options+
+agent re-applies its own values, the reverted lines show it and the command exits
+non-zero. Values are semantic (not raw bytes); a profile from another model is
+applied best-effort with a warning. No device serial or per-unit id is stored.
+
+> **Note on Logi Options+.** If the Options+ background agent is running, it may
+> re-apply its own DPI/SmartShift/wheel values on reconnect or app switch, so a
+> terminal change may not stick. Setters print a warning when the agent is
+> detected; `profile apply`'s drift report is how you see what actually held.
+> Quit Options+ for deterministic control.
 - **ReprogrammableKeysV4 (`0x1b04`)** — list controls (cid, task, capability
   flags, current mapping) and remap one control to a target **allowed by the
   source's groupMask** (not necessarily the same group; a group-2 control with

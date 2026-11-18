@@ -231,4 +231,112 @@ const HIRESWHEEL = {
   },
 };
 
-module.exports = { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL, CTRL_FLAGS };
+// ----------------------------------------------- Host switching 0x1814 / 0x1815
+// 0x1814 ChangeHost: func 0 get -> [0]=numHosts, [1]=currentHost (0-based).
+//   func 1 set -> [hostIndex] (0-based), NO reply (the mouse immediately leaves
+//   this host and connects to the target, so there is nothing to read back).
+// 0x1815 HostsInfo: func 0 -> [0]=flags, [2]=numHosts, [3]=currentHost.
+//   func 1 getHostInfo(host) -> [1]=status (paired, bool), [4]=nameLen.
+//   func 3 getHostName(host, offset) -> name bytes from payload offset 2.
+const HOSTS = {
+  async changeHostIdx(dev) {
+    const idx = await dev.getFeatureIndex(0x1814);
+    if (!idx) throw new Error("ChangeHost (0x1814) not supported by this device");
+    return idx;
+  },
+  async infoIdx(dev) {
+    return dev.getFeatureIndex(0x1815); // may be 0 (optional)
+  },
+  async _name(dev, infoIdx, host, nameLen) {
+    let name = "";
+    for (let off = 0; off < nameLen; off += 14) {
+      const r = await dev.call(infoIdx, 0x03, [host, off]);
+      const take = Math.min(14, nameLen - off);
+      name += r.slice(6, 6 + take).toString("utf8");
+    }
+    return name.replace(/\0+$/, "");
+  },
+  // [{index, current, paired, name}]
+  async list(dev) {
+    const ch = await HOSTS.changeHostIdx(dev);
+    const base = await dev.call(ch, 0x00, []);
+    const numHosts = base[4];
+    const current = base[5];
+    const info = await HOSTS.infoIdx(dev);
+    const out = [];
+    for (let i = 0; i < numHosts; i++) {
+      let paired = null;
+      let name = "";
+      if (info) {
+        try {
+          const hi = await dev.call(info, 0x01, [i]);
+          paired = !!hi[5];
+          const nameLen = hi[8];
+          if (nameLen) name = await HOSTS._name(dev, info, i, nameLen);
+        } catch {}
+      }
+      out.push({ index: i, current: i === current, paired, name });
+    }
+    return { numHosts, current, hosts: out };
+  },
+  // Switch the active host. Validates range and (when 0x1815 is present) that the
+  // slot is paired. Writes with no read-back; the caller must treat the
+  // subsequent disconnect as success.
+  async switch(dev, n) {
+    const { numHosts, current, hosts } = await HOSTS.list(dev);
+    if (!Number.isInteger(n) || n < 0 || n >= numHosts) throw new Error(`host index must be 0..${numHosts - 1}, got ${n}`);
+    if (n === current) return { noop: true, index: n };
+    const slot = hosts.find((h) => h.index === n);
+    if (slot && slot.paired === false) throw new Error(`host ${n} is not paired — pair it first, or use the mouse's Easy-Switch button`);
+    const ch = await HOSTS.changeHostIdx(dev);
+    await dev.call(ch, 0x01, [n]); // no_reply; device leaves immediately
+    return { noop: false, index: n };
+  },
+};
+
+// ------------------------------------------------------------ Profiles (compose)
+// A profile is a JSON snapshot of the one-shot settings, with a device identity
+// so apply can refuse/skip a mismatched model. Values are semantic, not raw bytes.
+const PROFILE = {
+  async snapshot(dev) {
+    const prod = dev.info.product || "unknown";
+    const settings = {};
+    try { settings.dpi = (await DPI.get(dev)).current; } catch {}
+    try { const s = await SMARTSHIFT.get(dev); settings.smartshift = { mode: s.mode, threshold: s.threshold }; } catch {}
+    try { const w = await HIRESWHEEL.get(dev); settings.wheel = { hires: w.hires, invert: w.invert }; } catch {}
+    return { version: 1, device: { model: prod, productId: dev.info.productId }, settings };
+  },
+  // Apply a profile best-effort; read every value back; return a drift report:
+  // [{setting, wanted, got, stuck}]. Caller decides how to print it.
+  async apply(dev, profile) {
+    const report = [];
+    const s = profile.settings || {};
+    if (typeof s.dpi === "number") {
+      try { const r = await DPI.set(dev, s.dpi); report.push({ setting: "dpi", wanted: s.dpi, got: r.current, stuck: r.current === s.dpi }); }
+      catch (e) { report.push({ setting: "dpi", wanted: s.dpi, got: null, stuck: false, error: e.message }); }
+    }
+    if (s.smartshift) {
+      try {
+        if (s.smartshift.mode) await SMARTSHIFT.setMode(dev, s.smartshift.mode);
+        let r = await SMARTSHIFT.get(dev);
+        if (typeof s.smartshift.threshold === "number") r = await SMARTSHIFT.setThreshold(dev, s.smartshift.threshold);
+        const okMode = !s.smartshift.mode || r.mode === s.smartshift.mode;
+        const okThr = typeof s.smartshift.threshold !== "number" || r.threshold === s.smartshift.threshold;
+        report.push({ setting: "smartshift", wanted: s.smartshift, got: { mode: r.mode, threshold: r.threshold }, stuck: okMode && okThr });
+      } catch (e) { report.push({ setting: "smartshift", wanted: s.smartshift, got: null, stuck: false, error: e.message }); }
+    }
+    if (s.wheel) {
+      try {
+        if (typeof s.wheel.hires === "boolean") await HIRESWHEEL.setBit(dev, "hires", s.wheel.hires);
+        if (typeof s.wheel.invert === "boolean") await HIRESWHEEL.setBit(dev, "invert", s.wheel.invert);
+        const w = await HIRESWHEEL.get(dev);
+        const okH = typeof s.wheel.hires !== "boolean" || w.hires === s.wheel.hires;
+        const okI = typeof s.wheel.invert !== "boolean" || w.invert === s.wheel.invert;
+        report.push({ setting: "wheel", wanted: s.wheel, got: { hires: w.hires, invert: w.invert }, stuck: okH && okI });
+      } catch (e) { report.push({ setting: "wheel", wanted: s.wheel, got: null, stuck: false, error: e.message }); }
+    }
+    return report;
+  },
+};
+
+module.exports = { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL, HOSTS, PROFILE, CTRL_FLAGS };

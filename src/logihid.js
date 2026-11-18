@@ -15,8 +15,26 @@
 // Replies can carry device identifiers; redirect to a file rather than pasting
 // terminal output into shared channels.
 
+const fs = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const { HidppDevice, FEATURES } = require("./hidpp");
-const { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL } = require("./features");
+const { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL, HOSTS, PROFILE } = require("./features");
+
+// Warn if the Logi Options+ agent is running: it may silently re-apply its own
+// values after a write. Best-effort; never fatal.
+function optionsPlusRunning() {
+  try {
+    execFileSync("pgrep", ["-x", "logioptionsplus_agent"], { stdio: ["ignore", "ignore", "ignore"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function warnOptionsPlus() {
+  if (optionsPlusRunning()) {
+    process.stderr.write("note: Logi Options+ agent is running; it may re-apply its own settings on reconnect/app-switch.\n");
+  }
+}
 
 function usage(code = 0) {
   process.stdout.write(`logihid - direct HID++ mouse control
@@ -33,6 +51,10 @@ function usage(code = 0) {
   logihid wheel                         show hi-res wheel state
   logihid wheel hires on|off            toggle hi-res smooth scrolling
   logihid wheel invert on|off           toggle scroll direction
+  logihid host                          list paired computers (slot, current, name)
+  logihid host <n>                      switch mouse to paired computer n (0-based)
+  logihid profile save <file>           snapshot settings to a JSON file
+  logihid profile apply <file>          apply a profile, then report what stuck
   logihid raw <featureId> <func> [bytes...]
 
   --pid <hex>   select productId (default: first HID++ device found)
@@ -96,6 +118,7 @@ async function main() {
     } else if (cmd === "dpi" && sub === "set") {
       const n = num(args[0]);
       if (n === undefined) usage(2);
+      warnOptionsPlus();
       const before = await DPI.get(dev);
       console.log(`current : ${before.current} dpi`);
       const after = await DPI.set(dev, n);
@@ -145,6 +168,58 @@ async function main() {
       const w = await HIRESWHEEL.setBit(dev, sub, v === "on");
       console.log(`${sub} set : ${(sub === "hires" ? w.hires : w.invert) ? "on" : "off"}`);
       console.log(`wheel     : hires ${w.hires ? "on" : "off"}, invert ${w.invert ? "on" : "off"}`);
+    } else if (cmd === "host" && !sub) {
+      const { current, hosts } = await HOSTS.list(dev);
+      for (const h of hosts) {
+        const mark = h.current ? "*" : " ";
+        const paired = h.paired === null ? "?" : h.paired ? "paired" : "unpaired";
+        console.log(`${mark} ${h.index}  ${paired.padEnd(8)} ${h.name || ""}`.trimEnd());
+      }
+      console.log(`(current = ${current}; * marks it. Use the mouse's Easy-Switch button to come back.)`);
+    } else if (cmd === "host") {
+      const n = num(sub);
+      if (n === undefined) usage(2);
+      warnOptionsPlus();
+      const r = await HOSTS.switch(dev, n);
+      if (r.noop) console.log(`host ${n} is already the current host; nothing to do.`);
+      else {
+        console.log(`switching to host ${n} — the mouse will now disconnect from this machine. This is normal.`);
+        console.log(`If it does not appear on host ${n}, press the mouse's Easy-Switch button to pick a host.`);
+      }
+    } else if (cmd === "profile" && sub === "save") {
+      const file = args[0];
+      if (!file) usage(2);
+      const snap = await PROFILE.snapshot(dev);
+      fs.writeFileSync(file, JSON.stringify(snap, null, 2) + "\n");
+      console.log(`saved ${Object.keys(snap.settings).length} setting group(s) for ${snap.device.model} to ${file}`);
+    } else if (cmd === "profile" && sub === "apply") {
+      const file = args[0];
+      if (!file) usage(2);
+      let prof;
+      try {
+        prof = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch (e) {
+        process.stderr.write(`cannot read profile ${file}: ${e.message}\n`);
+        process.exit(1);
+      }
+      if (prof.device && prof.device.productId && prof.device.productId !== dev.info.productId) {
+        process.stderr.write(
+          `warning: profile is for productId 0x${prof.device.productId.toString(16)} (${prof.device.model}), ` +
+            `this device is 0x${dev.info.productId.toString(16)}. Applying best-effort.\n`
+        );
+      }
+      warnOptionsPlus();
+      const report = await PROFILE.apply(dev, prof);
+      let reverted = 0;
+      for (const r of report) {
+        const status = r.error ? `error: ${r.error}` : r.stuck ? "ok" : "REVERTED/!=";
+        if (!r.stuck) reverted++;
+        console.log(`${r.setting.padEnd(11)} wanted ${JSON.stringify(r.wanted)} -> got ${JSON.stringify(r.got)}  [${status}]`);
+      }
+      if (reverted) {
+        console.log(`\n${reverted} setting(s) did not stick — Logi Options+ may be re-applying its own values.`);
+        process.exitCode = 1;
+      }
     } else if (cmd === "raw") {
       const id = num(sub);
       const func = num(args[0]);
