@@ -16,7 +16,7 @@
 // terminal output into shared channels.
 
 const { HidppDevice, FEATURES } = require("./hidpp");
-const { DPI, BATTERY, BUTTONS } = require("./features");
+const { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL } = require("./features");
 
 function usage(code = 0) {
   process.stdout.write(`logihid - direct HID++ mouse control
@@ -27,6 +27,12 @@ function usage(code = 0) {
   logihid battery
   logihid buttons                       list controls
   logihid buttons remap <cid> <target>  remap control to another (hex or dec)
+  logihid smartshift                    show ratchet/freespin mode + threshold
+  logihid smartshift ratchet|freespin   set wheel mode
+  logihid smartshift threshold <1-50>   set auto-shift torque threshold
+  logihid wheel                         show hi-res wheel state
+  logihid wheel hires on|off            toggle hi-res smooth scrolling
+  logihid wheel invert on|off           toggle scroll direction
   logihid raw <featureId> <func> [bytes...]
 
   --pid <hex>   select productId (default: first HID++ device found)
@@ -115,6 +121,30 @@ async function main() {
       if (cid === undefined || target === undefined) usage(2);
       const r = await BUTTONS.remap(dev, cid, target);
       console.log(`remapped 0x${cid.toString(16)} -> 0x${r.mappedTo.toString(16)} (flags 0x${r.flags.toString(16)})`);
+    } else if (cmd === "smartshift" && !sub) {
+      const s = await SMARTSHIFT.get(dev);
+      console.log(`mode      : ${s.mode}`);
+      console.log(`threshold : ${s.threshold} (1=easiest free-spin .. 50=always ratcheted)`);
+    } else if (cmd === "smartshift" && (sub === "ratchet" || sub === "freespin")) {
+      const s = await SMARTSHIFT.setMode(dev, sub);
+      console.log(`mode set  : ${s.mode}`);
+    } else if (cmd === "smartshift" && sub === "threshold") {
+      const n = num(args[0]);
+      if (n === undefined) usage(2);
+      const s = await SMARTSHIFT.setThreshold(dev, n);
+      console.log(`threshold : ${s.threshold} (mode ${s.mode})`);
+    } else if (cmd === "wheel" && !sub) {
+      const w = await HIRESWHEEL.get(dev);
+      console.log(`hires   : ${w.hires ? "on" : "off"}`);
+      console.log(`invert  : ${w.invert ? "on" : "off"}`);
+      console.log(`ratchet : ${w.ratchet ? "on (notched)" : "off (free)"}`);
+      console.log(`target  : ${w.target ? "HID++ (diverted)" : "HID"}  (not changed by this CLI)`);
+    } else if (cmd === "wheel" && (sub === "hires" || sub === "invert")) {
+      const v = args[0];
+      if (v !== "on" && v !== "off") usage(2);
+      const w = await HIRESWHEEL.setBit(dev, sub, v === "on");
+      console.log(`${sub} set : ${(sub === "hires" ? w.hires : w.invert) ? "on" : "off"}`);
+      console.log(`wheel     : hires ${w.hires ? "on" : "off"}, invert ${w.invert ? "on" : "off"}`);
     } else if (cmd === "raw") {
       const id = num(sub);
       const func = num(args[0]);

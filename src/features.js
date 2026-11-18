@@ -146,4 +146,89 @@ const BUTTONS = {
   },
 };
 
-module.exports = { DPI, BATTERY, BUTTONS, CTRL_FLAGS };
+// ------------------------------------------------------------- SmartShift 0x2110
+// func 0 getRatchetControlMode -> [0]=mode (1=freespin, 2=ratchet),
+//        [1]=autoDisengage threshold, [2]=default threshold.
+// func 1 set -> [mode, threshold]. Per Solaar, a field sent as 0 is left
+// unchanged, so set mode with [mode,0] and threshold with [0,threshold].
+// Threshold range 1..50; >=50 is sent as 255 ("always ratcheted").
+const SMARTSHIFT = {
+  async feature(dev) {
+    const idx = await dev.getFeatureIndex(0x2110);
+    if (!idx) throw new Error("SmartShift (0x2110) not supported by this device");
+    return idx;
+  },
+  async get(dev) {
+    const idx = await SMARTSHIFT.feature(dev);
+    const r = await dev.call(idx, 0x00, []);
+    const raw = r[5];
+    return {
+      mode: r[4] === 1 ? "freespin" : "ratchet",
+      modeByte: r[4],
+      threshold: raw === 255 ? 50 : raw,
+      default: r[6],
+    };
+  },
+  async setMode(dev, mode /* "freespin"|"ratchet" */) {
+    const idx = await SMARTSHIFT.feature(dev);
+    const b = mode === "freespin" ? 1 : 2;
+    await dev.call(idx, 0x01, [b, 0]);
+    return SMARTSHIFT.get(dev);
+  },
+  async setThreshold(dev, n) {
+    if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error(`threshold must be 1..50, got ${n}`);
+    const idx = await SMARTSHIFT.feature(dev);
+    await dev.call(idx, 0x01, [0, n >= 50 ? 255 : n]);
+    return SMARTSHIFT.get(dev);
+  },
+};
+
+// ------------------------------------------------------------ HiResWheel 0x2121
+// func 0 caps -> [1] flags: 0x08 has_invert, 0x04 has_ratchet.
+// func 1 getMode -> [0] mode byte: bit0 target (divert to HID++), bit1 res
+//        (hi-res smooth scroll), bit2 invert.
+// func 2 setMode -> [modeByte]. Read-modify-write; bit0 (target) is left
+// untouched to avoid breaking the wheel's scroll delivery.
+const WHEEL_RES = 0x02;
+const WHEEL_INV = 0x04;
+const WHEEL_TARGET = 0x01;
+const HIRESWHEEL = {
+  async feature(dev) {
+    const idx = await dev.getFeatureIndex(0x2121);
+    if (!idx) throw new Error("HiResWheel (0x2121) not supported by this device");
+    return idx;
+  },
+  async caps(dev) {
+    const idx = await HIRESWHEEL.feature(dev);
+    const r = await dev.call(idx, 0x00, []);
+    return { hasInvert: !!(r[5] & 0x08), hasRatchet: !!(r[5] & 0x04), raw: r[5] };
+  },
+  async get(dev) {
+    const idx = await HIRESWHEEL.feature(dev);
+    const m = (await dev.call(idx, 0x01, []))[4];
+    const ratchet = (await dev.call(idx, 0x03, []))[4] & 0x01;
+    return {
+      modeByte: m,
+      target: !!(m & WHEEL_TARGET),
+      hires: !!(m & WHEEL_RES),
+      invert: !!(m & WHEEL_INV),
+      ratchet: !!ratchet,
+    };
+  },
+  // Set or clear the hi-res (res) or invert bit, preserving every other bit
+  // (notably target). Returns the post-write read.
+  async setBit(dev, which /* "hires"|"invert" */, on) {
+    const idx = await HIRESWHEEL.feature(dev);
+    if (which === "invert") {
+      const c = await HIRESWHEEL.caps(dev);
+      if (!c.hasInvert) throw new Error("this wheel does not support invert (caps bit 0x08 clear)");
+    }
+    const bit = which === "invert" ? WHEEL_INV : WHEEL_RES;
+    const cur = (await dev.call(idx, 0x01, []))[4];
+    const next = on ? cur | bit : cur & ~bit;
+    await dev.call(idx, 0x02, [next & 0xff]);
+    return HIRESWHEEL.get(dev);
+  },
+};
+
+module.exports = { DPI, BATTERY, BUTTONS, SMARTSHIFT, HIRESWHEEL, CTRL_FLAGS };

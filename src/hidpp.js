@@ -82,7 +82,19 @@ class HidppDevice {
   }
 
   // Low-level call. featIdx is a feature INDEX (from getFeatureIndex), not an ID.
+  // func is a function NUMBER 0..15 (it is shifted into the high nibble here).
   call(featIdx, func, params = [], timeoutMs = 2000) {
+    if (!Number.isInteger(func) || func < 0 || func > 15) {
+      return Promise.reject(new Error(`function number out of range 0..15: ${func}`));
+    }
+    if (!Number.isInteger(featIdx) || featIdx < 0 || featIdx > 255) {
+      return Promise.reject(new Error(`feature index out of range 0..255: ${featIdx}`));
+    }
+    for (const p of params) {
+      if (!Number.isInteger(p) || p < 0 || p > 255) {
+        return Promise.reject(new Error(`param byte out of range 0..255: ${p}`));
+      }
+    }
     return new Promise((res, rej) => {
       const frame = [LONG, this.idx, featIdx, (func << 4) | SW, ...params];
       while (frame.length < 20) frame.push(0);

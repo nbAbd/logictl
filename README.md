@@ -35,6 +35,12 @@ logihid dpi set <n>                   set DPI (validated, then read back)
 logihid battery                       charge % / level / charging status
 logihid buttons                       list controls, capabilities, mapping
 logihid buttons remap <cid> <target>  remap one control to another (prefix hex with 0x)
+logihid smartshift                    show ratchet/freespin mode + threshold
+logihid smartshift ratchet|freespin   set wheel mode
+logihid smartshift threshold <1-50>   auto-shift torque (1=easiest free-spin, 50=always ratcheted)
+logihid wheel                         show hi-res wheel state
+logihid wheel hires on|off            toggle hi-res smooth scrolling
+logihid wheel invert on|off           toggle scroll direction
 logihid raw <featureId> <func> [b..]  low-level HID++ call (integers; prefix hex with 0x)
 logihid --pid <0xNNNN> <cmd>          select a productId (default: first HID++ device)
 ```
@@ -79,9 +85,21 @@ status  : discharging
   (func 1: a value `>= 0xE000` is a step marker for a continuous range), `set`
   (func 3), validated against the range before writing. **Set is verified to
   take effect and hold** (1050 dpi held across a 3 s re-read, then restored).
-  Logi Options+ was not running during the test, so an override by Options+ was
-  not exercised; persistence across a mouse power cycle was not tested.
+  The Logi Options+ background agent (`logioptionsplus_agent` + `LogiPluginService`)
+  **was running** during the test and did not override the value in that window,
+  but it may re-apply its own settings on device reconnect or app switch —
+  persistence is not guaranteed; a mouse power cycle was not tested.
 - **UnifiedBattery (`0x1004`)** — func 1: charge percent, level, charging status.
+- **SmartShift (`0x2110`)** — `get` (func 0: mode + auto-disengage threshold +
+  default), set mode (func 1 `[mode,0]`, 1=freespin/2=ratchet) and threshold
+  (func 1 `[0,n]`, 1-50; `0` in a field means "leave unchanged", confirmed live).
+  Verified self-restoring: threshold 12↔13 with mode held; mode ratchet↔freespin
+  confirmed by the `0x2121` ratchet bit flipping.
+- **HiResWheel (`0x2121`)** — `get` (func 1 mode byte: bit0 target, bit1 hi-res,
+  bit2 invert; func 3 ratchet). `wheel hires/invert on|off` read-modify-write the
+  mode byte via func 2, **preserving bit0 (target)** so wheel scroll delivery is
+  never diverted. `invert` is gated on caps bit `0x08`. Verified self-restoring
+  (invert toggled, target+hi-res preserved, mode byte restored to `0x03`).
 - **ReprogrammableKeysV4 (`0x1b04`)** — list controls (cid, task, capability
   flags, current mapping) and remap one control to a target **allowed by the
   source's groupMask** (not necessarily the same group; a group-2 control with
@@ -180,7 +198,7 @@ node src/parse_pcap.js <file.pcap>    decode a captured session (tcpdump the loo
 ## Files
 
 - `src/hidpp.js` — HID++ 2.0 client (transport, feature discovery, ping).
-- `src/features.js` — AdjustableDPI, UnifiedBattery, ReprogrammableKeysV4 decoders.
+- `src/features.js` — AdjustableDPI, UnifiedBattery, ReprogrammableKeysV4, SmartShift, HiResWheel decoders.
 - `src/logihid.js` — the `logihid` CLI.
 - `src/protocol.js` / `src/cli.js` — kiros transport and the `logictl` CLI.
 - `src/ws_client.js` — LogiPluginService upgrade + Handshake client.
